@@ -1,0 +1,98 @@
+// Pins for the LEDs
+const int micPin = A0;    // KY-038 Analog output
+const int greenLed = 10;
+const int yellowLed = 11;
+const int redLed = 12;
+const int blueLed = 13;   // Blue is reserved for the peak beat
+
+// Variables for Beat Detection
+const int sampleWindow = 50; // Sample window width in milliseconds
+unsigned int sample;
+
+// Variables for Tracking Volume History (to find the average)
+const int historySize = 20;
+int volumeHistory[historySize];
+int historyIndex = 0;
+long historySum = 0;
+
+// Threshold multiplier for the main beat (Blue LED)
+// Lowered from 1.5 to 1.2 to make it much easier to trigger the beat
+const float beatThresholdMultiplier = 1.2; 
+
+void setup() {
+  pinMode(greenLed, OUTPUT);
+  pinMode(yellowLed, OUTPUT);
+  pinMode(redLed, OUTPUT);
+  pinMode(blueLed, OUTPUT);
+  
+  Serial.begin(9600);
+  
+  // Initialize history array with 0s
+  for (int i = 0; i < historySize; i++) {
+    volumeHistory[i] = 0;
+  }
+}
+
+void loop() {
+  unsigned long startMillis = millis(); 
+  unsigned int peakToPeak = 0;          // Amplitude level (max - min)
+
+  unsigned int signalMax = 0;
+  unsigned int signalMin = 1024;
+
+  // 1. Collect data for 50 milliseconds to find the volume "peak-to-peak"
+  while (millis() - startMillis < sampleWindow) {
+    sample = analogRead(micPin);
+    if (sample < 1024) { 
+      if (sample > signalMax) {
+        signalMax = sample; 
+      } else if (sample < signalMin) {
+        signalMin = sample; 
+      }
+    }
+  }
+  peakToPeak = signalMax - signalMin; // This is our current Amplitude (Volume)
+
+  // 2. Calculate the running average of past volume levels
+  historySum -= volumeHistory[historyIndex];       
+  volumeHistory[historyIndex] = peakToPeak;        
+  historySum += volumeHistory[historyIndex];       
+  historyIndex = (historyIndex + 1) % historySize; 
+
+  float averageVolume = (float)historySum / historySize;
+
+  // 3. Print values to the Serial Monitor so you can see why it triggers
+  Serial.print("Current_Volume: ");
+  Serial.print(peakToPeak);
+  Serial.print("  |  Average_Volume: ");
+  Serial.println(averageVolume);
+
+  // 4. 4-LED Pattern & Intensity Logic (Super Sensitive Version)
+  
+  // Turn everything off initially each loop to refresh the lights
+  digitalWrite(greenLed, LOW);
+  digitalWrite(yellowLed, LOW);
+  digitalWrite(redLed, LOW);
+  digitalWrite(blueLed, LOW);
+
+  // Level 1: Low Volume (Green lights up)
+  if (peakToPeak > 5) { // Lowered from 15
+    digitalWrite(greenLed, HIGH);
+  }
+  
+  // Level 2: Medium Volume (Green + Yellow light up)
+  if (peakToPeak > (averageVolume * 1.05) && peakToPeak > 15) { // Lowered from 30
+    digitalWrite(yellowLed, HIGH);
+  }
+  
+  // Level 3: Loud Volume (Green + Yellow + Red light up)
+  if (peakToPeak > (averageVolume * 1.1) && peakToPeak > 25) { // Lowered from 50
+    digitalWrite(redLed, HIGH);
+  }
+  
+  // Level 4: THE BEAT! (Blue flashes)
+  if (peakToPeak > (averageVolume * beatThresholdMultiplier) && peakToPeak > 35) { // Lowered from 70
+    digitalWrite(blueLed, HIGH);
+    delay(30); // Keeps the blue beat flash visible to the eye
+  }
+}
