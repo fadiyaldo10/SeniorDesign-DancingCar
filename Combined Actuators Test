@@ -1,0 +1,76 @@
+// --- PIN CONFIGURATIONS (Unified from your 4 testing sketches) ---
+// Front Left (FL.ino) [cite: 410]
+const int FL_RPWM = 2;  const int FL_LPWM = 3;
+const int FL_R_EN = 22; const int FL_L_EN = 23;
+
+// Front Right (FR.ino) [cite: 406]
+const int FR_RPWM = 4;  const int FR_LPWM = 5;
+const int FR_R_EN = 24; const int FR_L_EN = 25;
+
+// Rear Left (RL.ino) [cite: 402]
+const int RL_RPWM = 6;  const int RL_LPWM = 7;
+const int RL_R_EN = 26; const int RL_L_EN = 27;
+
+// Rear Right (RR.ino) [cite: 398]
+const int RR_RPWM = 8;  const int RR_LPWM = 9;
+const int RR_R_EN = 28; const int RR_L_EN = 29;
+
+void setup() {
+  // Configure Output Modes
+  pinMode(FL_RPWM, OUTPUT); pinMode(FL_LPWM, OUTPUT); pinMode(FL_R_EN, OUTPUT); pinMode(FL_L_EN, OUTPUT);
+  pinMode(FR_RPWM, OUTPUT); pinMode(FR_LPWM, OUTPUT); pinMode(FR_R_EN, OUTPUT); pinMode(FR_L_EN, OUTPUT);
+  pinMode(RL_RPWM, OUTPUT); pinMode(RL_LPWM, OUTPUT); pinMode(RL_R_EN, OUTPUT); pinMode(RL_L_EN, OUTPUT);
+  pinMode(RR_RPWM, OUTPUT); pinMode(RR_LPWM, OUTPUT); pinMode(RR_R_EN, OUTPUT); pinMode(RR_L_EN, OUTPUT);
+
+  // Enable all motor drivers [cite: 399, 403, 407, 411]
+  digitalWrite(FL_R_EN, HIGH); digitalWrite(FL_L_EN, HIGH);
+  digitalWrite(FR_R_EN, HIGH); digitalWrite(FR_L_EN, HIGH);
+  digitalWrite(RL_R_EN, HIGH); digitalWrite(RL_L_EN, HIGH);
+  digitalWrite(RR_R_EN, HIGH); digitalWrite(RR_L_EN, HIGH);
+
+  // High-speed baud rate matching Jetson Nano
+  Serial.begin(115200); 
+}
+
+void loop() {
+  // Listen for commands from the Jetson Nano
+  if (Serial.available() >= 5) { // 4 data characters + '\n' newline
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    if (command.length() == 4) {
+      char fl_state = command.charAt(0);
+      char fr_state = command.charAt(1);
+      char rl_state = command.charAt(2);
+      char rr_state = command.charAt(3);
+
+      // --- EXECUTE FRONT LEFT ---
+      if (fl_state == '1') {      // Move UP [cite: 414]
+        analogWrite(FL_RPWM, 255); analogWrite(FL_LPWM, 0);
+      } else {                    // Move DOWN [cite: 416]
+        analogWrite(FL_RPWM, 0);   analogWrite(FL_LPWM, 255);
+      }
+
+      // --- EXECUTE FRONT RIGHT ---
+      if (fr_state == '1') {      // Move UP [cite: 408]
+        analogWrite(FR_RPWM, 230); analogWrite(FR_LPWM, 0); // Preserved custom 230 value from FR.ino
+      } else {                    // Move DOWN [cite: 409]
+        analogWrite(FR_RPWM, 0);   analogWrite(FR_LPWM, 230);
+      }
+
+      // --- EXECUTE REAR LEFT ---
+      if (rl_state == '1') {      // Move UP [cite: 404]
+        analogWrite(RL_RPWM, 255); analogWrite(RL_LPWM, 0);
+      } else {                    // Move DOWN [cite: 405]
+        analogWrite(RL_RPWM, 0);   analogWrite(RL_LPWM, 255);
+      }
+
+      // --- EXECUTE REAR RIGHT ---
+      if (rr_state == '1') {      // Move UP [cite: 400]
+        analogWrite(RR_RPWM, 255); analogWrite(RR_LPWM, 0);
+      } else {                    // Move DOWN [cite: 401]
+        analogWrite(RR_RPWM, 0);   analogWrite(RR_LPWM, 255);
+      }
+    }
+  }
+}
