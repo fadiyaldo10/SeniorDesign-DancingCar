@@ -1,0 +1,114 @@
+import pyaudio
+import numpy as np
+import serial
+import time
+
+# --- SERIAL CONFIGURATION ---
+# Replace '/dev/ttyACM0' with your actual Arduino Mega port on the Jetson Nano
+try:
+    arduino = serial.Serial('/dev/ttyACM0', 115200, timeout=0.1)
+    time.sleep(2) # Give Arduino time to reset/initialize
+    print("Connected to Arduino Mega successfully!")
+except Exception as e:
+    print(f"Error connecting to Serial: {e}")
+    exit()
+
+# --- AUDIO CONFIGURATION (For USB Mic) ---
+CHUNK = 1024             
+FORMAT = pyaudio.paInt16 
+CHANNELS = 1             
+RATE = 44100             
+
+p = pyaudio.PyAudio()
+stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE,
+                input=True, frames_per_buffer=CHUNK)
+
+# --- BEAT & MODE SELECTION TRACKING VARIABLES ---
+bass_history = []
+history_size = 40
+threshold_multiplier = 1.35  # Adjust sensitivity
+last_beat_time = 0
+beat_debounce = 0.35         # 350ms minimum gap between actuator shifts
+beat_count = 0
+current_mode = 1
+total_beat_counter = 0
+beats_per_mode = 16          # Cycle patterns every 16 beats
+
+print("--- JETSON NANO ACTUATOR BRAIN STARTED ---")
+
+def send_actuator_command(fl, fr, rl, rr):
+    """Sends a 4-character binary command string to the Arduino (1=UP/EXTEND, 0=DOWN/RETRACT)"""
+    command_string = f"{fl}{fr}{rl}{rr}\n"
+    arduino.write(command_string.encode('utf-8'))
+
+try:
+    while True:
+        data = stream.read(CHUNK, exception_on_overflow=False)
+        audio_data = np.frombuffer(data, dtype=np.int16)
+        
+        # Run Fast Fourier Transform (FFT)
+        fft_data = np.abs(np.fft.rfft(audio_data))
+        fft_freqs = np.fft.rfftfreq(len(audio_data), 1.0/RATE)
+        
+        # Isolate Bass Frequencies (20Hz to 120Hz)
+        bass_indices = np.where((fft_freqs >= 20) & (fft_freqs <= 120))[0]
+        current_bass_volume = np.mean(fft_data[bass_indices]) if len(bass_indices) > 0 else 0
+        
+        bass_history.append(current_bass_volume)
+        if len(bass_history) > history_size:
+            bass_history.pop(0)
+        avg_bass_volume = np.mean(bass_history)
+        
+        current_time = time.time()
+        # Detect timing spikes (beats)
+        if (current_bass_volume > (avg_bass_volume * threshold_multiplier) and 
+            current_bass_volume > 45000 and 
+            (current_time - last_beat_time > beat_debounce)):
+            
+            last_beat_time = current_time
+            beat_count = (beat_count % 4) + 1
+            total_beat_counter += 1
+            
+            # Switch choreography modes automatically
+            if total_beat_counter >= beats_per_mode:
+                total_beat_counter = 0
+                current_mode = (current_mode % 5) + 1
+                print(f"\n>>> CHANGING TO CHOREOGRAPHY MODE: {current_mode} <<<\n")
+                
+            # Variables representing Actuator targets: (FL, FR, RL, RR) -> 1=UP, 0=DOWN
+            fl, fr, rl, rr = 0, 0, 0, 0
+            
+            # Execute Active Mode Configurations
+            if current_mode == 1:    # Alternating Left vs Right
+                if beat_count in [1, 3]: fl, rl = 1, 1  # Left Up
+                else:                    fr, rr = 1, 1  # Right Up
+            elif current_mode == 2:  # Front vs Back
+                if beat_count in [1, 3]: fl, fr = 1, 1  # Front Up
+                else:                    rl, rr = 1, 1  # Back Up
+            elif current_mode == 3:  # Sequential Single Actuator Cycle
+                if beat_count == 1:   fl = 1
+                elif beat_count == 2: fr = 1
+                elif beat_count == 3: rr = 1
+                elif beat_count == 4: rl = 1
+            elif current_mode == 4:  # Random Individual Pops
+                rand_sel = np.random.randint(1, 5)
+                if rand_sel == 1:   fl = 1
+                elif rand_sel == 2: fr = 1
+                elif rand_sel == 3: rr = 1
+                elif rand_sel == 4: rl = 1
+            elif current_mode == 5:  # All Up / All Down Flash
+                if beat_count in [1, 3]: fl, fr, rl, rr = 1, 1, 1, 1
+                else:                    fl, fr, rl, rr = 0, 0, 0, 0
+
+            print(f"Mode [{current_mode}] Beat [{beat_count}] -> Sending Matrix: FL={fl} FR={fr} RL={rl} RR={rr}")
+            send_actuator_command(fl, fr, rl, rr)
+
+except KeyboardInterrupt:
+    print("\nShutting down brain cleanly...")
+finally:
+    # Send all down safe state upon exit
+    send_actuator_command(0, 0, 0, 0)
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    arduino.close()
