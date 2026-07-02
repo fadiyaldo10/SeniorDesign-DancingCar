@@ -1,0 +1,204 @@
+import time
+import random
+import sys
+import numpy as np
+import pyaudio
+import serial
+
+# ==============================================================================
+# CONFIGURATIONS & INITIALIZATION
+# ==============================================================================
+
+# Serial Port Configuration (Adjust '/dev/ttyUSB0' or '/dev/ttyACM0' to match your board)
+SERIAL_PORT = '/dev/ttyACM0' 
+BAUD_RATE = 115200
+
+try:
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+    time.sleep(2) # Allow microcontroller to reset
+    print(f"Connected to actuator controller on {SERIAL_PORT}")
+except Exception as e:
+    print(f"Serial connection failed: {e}")
+    sys.exit(1)
+
+# Audio Stream Settings for USB Mic
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 44100          # Standard sampling rate
+CHUNK = 512           # Small block size to keep latency low
+
+p = pyaudio.PyAudio()
+try:
+    stream = p.open(format=FORMAT,
+                    channels=CHANNELS,
+                    rate=RATE,
+                    input=True,
+                    frames_per_buffer=CHUNK)
+    print("USB Microphone stream started successfully.")
+except Exception as e:
+    print(f"Could not open audio stream: {e}")
+    sys.exit(1)
+
+# --- Signal Processing Filter Variables ---
+dc = 0.0          # Dynamic bias centering
+lowPass = 0.0
+dcAlpha = 0.005
+bassAlpha = 0.08
+sampleWindow = 0.020 # 20ms sample window
+
+# History tracking
+historySize = 25
+bassHistory = [0] * historySize
+trebleHistory = [0] * historySize
+historyIndex = 0
+
+# Sensitivity Tunings (Mirrored from Code 2)
+bassMultiplier = 1.65
+trebleMultiplier = 1.75
+beatDebounce = 0.250 # 250ms converted to seconds
+
+# Timing & Choreography Trackers
+lastBeatTime = 0.0
+beatCount = 0
+currentMode = 1
+totalBeatCounter = 0
+beatsPerMode = 16
+
+print("--- MULTI-MODE JETSON NANO AUDIO CHOREOGRAPHY STARTED ---")
+
+# ==============================================================================
+# HELPER FUNCTION: SEND TO ACTUATORS
+# ==============================================================================
+def set_actuators(fl, fr, rl, rr):
+    """
+    Constructs and sends the 4-character string + newline expected by Code 1.
+    Receives boolean or int (1/0) values for front-left, front-right, etc.
+    """
+    cmd = f"{int(fl)}{int(fr)}{int(rl)}{int(rr)}\n"
+    ser.write(cmd.encode('utf-8'))
+
+# Ensure everything starts at a known state
+set_actuators(0, 0, 0, 0)
+
+# ==============================================================================
+# MAIN PROCESSING LOOP
+# ==============================================================================
+try:
+    while True:
+        bassMax = -10000.0
+        bassMin = 10000.0
+        trebleMax = -10000.0
+        trebleMin = 10000.0
+
+        startTime = time.time()
+
+        # 1. COLLECT SAMPLES & SEPARATE BASS FROM TREBLE WITHIN THE 20ms WINDOW
+        while (time.time() - startTime) < sampleWindow:
+            try:
+                # Read raw audio chunk data (non-blocking if data isn't ready)
+                data = stream.read(CHUNK, exception_on_overflow=False)
+                # Convert raw bytes into signed 16-bit integers
+                samples = np.frombuffer(data, dtype=np.int16).astype(float)
+            except IOError:
+                continue
+
+            for raw in samples:
+                # Remove DC Offset bias
+                dc += dcAlpha * (raw - dc)
+                centered = raw - dc
+
+                # Low-pass Isolation (Bass frequencies)
+                lowPass += bassAlpha * (centered - lowPass)
+
+                # High-pass Isolation (Treble snippets)
+                highPass = centered - lowPass
+
+                if lowPass > bassMax: bassMax = lowPass
+                if lowPass < bassMin: bassMin = lowPass
+
+                if highPass > trebleMax: trebleMax = highPass
+                if highPass < trebleMin: trebleMin = highPass
+
+        bassLevel = bassMax - bassMin
+        trebleLevel = trebleMax - trebleMin
+
+        # 2. UPDATE RUNNING HISTORIES
+        bassHistory[historyIndex] = bassLevel
+        trebleHistory[historyIndex] = trebleLevel
+
+        historyIndex += 1
+        if historyIndex >= historySize:
+            historyIndex = 0
+
+        bassAverage = sum(bassHistory) / historySize
+        trebleAverage = sum(trebleHistory) / historySize
+
+        # Absolute hard-floors match the C++ code adjustments (25 and 20)
+        bassBeat = (bassLevel > bassAverage * bassMultiplier) and (bassLevel > 25)
+        trebleBeat = (trebleLevel > trebleAverage * trebleMultiplier) and (trebleLevel > 20)
+
+        # 3. TRIGGER IF A FREQUENCY SPIKE IS REGISTERED
+        currentTime = time.time()
+        if (bassBeat or trebleBeat) and (currentTime - lastBeatTime > beatDebounce):
+            lastBeatTime = currentTime
+
+            beatCount += 1
+            totalBeatCounter += 1
+
+            if beatCount > 4:
+                beatCount = 1
+
+            # Check if it's time to cycle to the next choreography pattern
+            if totalBeatCounter >= beatsPerMode:
+                totalBeatCounter = 0
+                currentMode += 1
+                if currentMode > 5:
+                    currentMode = 1
+                print(f"\n>>> SWITCHING TO CHOREOGRAPHY PATTERN MODE: {currentMode}")
+
+            print(f"Mode [{currentMode}] - Beat: {beatCount} | BassLvl: {bassLevel:.1f} | TrebleLvl: {trebleLevel:.1f}")
+
+            # 4. THE MASTER CHOREOGRAPHY SWITCH
+            # Maps the old LED configurations directly to the 4 linear actuators:
+            # (FL, FR, RL, RR)
+            
+            if currentMode == 1:
+                if beatCount in [1, 3]:
+                    set_actuators(1, 0, 1, 0) # Green & Blue equivalent ON
+                elif beatCount in [2, 4]:
+                    set_actuators(0, 1, 0, 1) # Red & Yellow equivalent ON
+
+            elif currentMode == 2:
+                if beatCount in [1, 3]:
+                    set_actuators(1, 1, 0, 0) # Front units ON
+                elif beatCount in [2, 4]:
+                    set_actuators(0, 0, 1, 1) # Back units ON
+
+            elif currentMode == 3:
+                if beatCount == 1:   set_actuators(1, 0, 0, 0)
+                elif beatCount == 2: set_actuators(0, 1, 0, 0)
+                elif beatCount == 3: set_actuators(0, 0, 0, 1)
+                elif beatCount == 4: set_actuators(0, 0, 1, 0)
+
+            elif currentMode == 4:
+                randomBeat = random.randint(1, 4)
+                if randomBeat == 1:   set_actuators(1, 0, 0, 0)
+                elif randomBeat == 2: set_actuators(0, 1, 0, 0)
+                elif randomBeat == 3: set_actuators(0, 0, 0, 1)
+                elif randomBeat == 4: set_actuators(0, 0, 1, 0)
+
+            elif currentMode == 5:
+                if beatCount in [1, 3]:
+                    set_actuators(1, 1, 1, 1) # All ON
+                elif beatCount in [2, 4]:
+                    set_actuators(0, 0, 0, 0) # All OFF
+
+except KeyboardInterrupt:
+    print("\nTerminating lightshow execution cleanly...")
+finally:
+    # Cleanup resources
+    set_actuators(0, 0, 0, 0)
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    ser.close()
