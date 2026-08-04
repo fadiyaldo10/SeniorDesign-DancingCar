@@ -94,8 +94,8 @@ void controlActuatorSlider(const int a[], int value) {
 }
 
 void setup() {
-  Serial.begin(115200);
-  Serial1.begin(115200);              // Bluetooth (app)
+  Serial.begin(115200);               // USB: Jetson (gesture + music)
+  Serial1.begin(9600);                // Bluetooth (app) - HC-05 default
   enableActuator(FL); enableActuator(FR);
   enableActuator(RL); enableActuator(RR);
   servoLeft.attach(10); servoRight.attach(11);
