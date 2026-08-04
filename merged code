@@ -1,0 +1,183 @@
+#include <Servo.h>
+
+// ---- Actuator pins: {RPWM, LPWM, R_EN, L_EN} ----
+const int FL[4] = {2, 3, 22, 23};
+const int FR[4] = {4, 5, 24, 25};
+const int RL[4] = {6, 7, 26, 27};
+const int RR[4] = {8, 9, 28, 29};
+
+// ---- Servos ----
+Servo servoLeft;   // pin 10
+Servo servoRight;  // pin 11
+const int CENTER = 90, LEFT_POS = 60, RIGHT_POS = 120;
+const int S_MIN = 30, S_MAX = 150;
+const int S_P1 = 30, S_P2 = 70, S_P3 = 110, S_P4 = 150;
+
+// ---- Mode: 0 = GESTURE, 1 = MUSIC, 2 = APP ----
+int mode = 0;
+
+// ---- Gesture actuator state (latched) ----
+String command = "STOP";
+unsigned long cmdTime = 0;
+const unsigned long TIMEOUT = 2000;
+
+// ---- Music servo state ----
+int servoState = 0;
+int sweepPosition = 0;
+
+// ---- Bluetooth buffering ----
+String bluetoothCommand = "";
+unsigned long lastBtChar = 0;
+const unsigned long BT_DELAY = 50;
+
+// ---------- actuator helpers ----------
+void extendA(const int a[])  { analogWrite(a[0], 0);   analogWrite(a[1], 230); }
+void retractA(const int a[]) { analogWrite(a[0], 230); analogWrite(a[1], 0);   }
+void stopA(const int a[])    { analogWrite(a[0], 0);   analogWrite(a[1], 0);   }
+
+void enableActuator(const int a[]) {
+  pinMode(a[0], OUTPUT); pinMode(a[1], OUTPUT);
+  pinMode(a[2], OUTPUT); pinMode(a[3], OUTPUT);
+  digitalWrite(a[2], HIGH); digitalWrite(a[3], HIGH);
+}
+void stopAll() { stopA(FL); stopA(FR); stopA(RL); stopA(RR); }
+
+// ---------- music servo choreography ----------
+void syncedSwing() {
+  servoState = !servoState;
+  int a = servoState ? S_MAX : S_MIN;
+  servoRight.write(a); servoLeft.write(a);
+}
+void mirroredSwing() {
+  servoState = !servoState;
+  if (servoState) { servoRight.write(S_MAX); servoLeft.write(S_MIN); }
+  else            { servoRight.write(S_MIN); servoLeft.write(S_MAX); }
+}
+void steppedSweep() {
+  int a;
+  switch (sweepPosition) {
+    case 0: a = S_P1; break; case 1: a = S_P2; break;
+    case 2: a = S_P3; break; case 3: a = S_P4; break; default: a = S_P1;
+  }
+  servoRight.write(a); servoLeft.write(a);
+  sweepPosition = (sweepPosition + 1) % 4;
+}
+void randomAngles() {
+  servoRight.write(random(S_MIN, S_MAX + 1));
+  servoLeft.write(random(S_MIN, S_MAX + 1));
+}
+void triggerChoreography(char m) {
+  switch (m) {
+    case '1': case '5': syncedSwing(); break;
+    case '2': mirroredSwing(); break;
+    case '3': steppedSweep(); break;
+    case '4': randomAngles(); break;
+    default: break;
+  }
+}
+void driveActuator(char c, const int a[]) {
+  if (c == '1') { analogWrite(a[0], 0); analogWrite(a[1], 255); }
+  else          { analogWrite(a[0], 255); analogWrite(a[1], 0); }
+}
+
+// ---------- app per-actuator slider ----------
+void controlActuatorSlider(const int a[], int value) {
+  value = constrain(value, 10, 50);
+  if (value == 30) { stopA(a); return; }
+  if (value < 30) {
+    int s = constrain(map(value, 10, 30, 255, 0), 0, 255);
+    analogWrite(a[0], s); analogWrite(a[1], 0);
+  } else {
+    int s = constrain(map(value, 30, 50, 0, 255), 0, 255);
+    analogWrite(a[0], 0); analogWrite(a[1], s);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(115200);              // Bluetooth (app)
+  enableActuator(FL); enableActuator(FR);
+  enableActuator(RL); enableActuator(RR);
+  servoLeft.attach(10); servoRight.attach(11);
+  servoLeft.write(CENTER); servoRight.write(CENTER);
+  Serial.println("Merged controller ready. Mode = GESTURE");
+}
+
+// ---------- central router ----------
+void processCommand(String c) {
+  c.trim();
+  if (c.length() == 0) return;
+
+  // --- MODE SWITCH (works in any mode) ---
+  if (c == "GESTURE") { mode = 0; command = "STOP"; stopAll(); Serial.println("MODE = GESTURE"); return; }
+  if (c == "MUSIC")   { mode = 1; command = "STOP"; stopAll(); Serial.println("MODE = MUSIC");   return; }
+  if (c == "APP")     { mode = 2; command = "STOP"; stopAll(); Serial.println("MODE = APP");     return; }
+
+  // --- APP format: contains a colon, e.g. FL:45 ---
+  int colon = c.indexOf(':');
+  if (colon > 0) {
+    if (mode != 2) return;
+    String dev = c.substring(0, colon);
+    int val = c.substring(colon + 1).toInt();
+    if      (dev == "FL") controlActuatorSlider(FL, val);
+    else if (dev == "FR") controlActuatorSlider(FR, val);
+    else if (dev == "BL") controlActuatorSlider(RL, val);   // BL -> RL
+    else if (dev == "BR") controlActuatorSlider(RR, val);   // BR -> RR
+    return;
+  }
+
+  // --- MUSIC format: exactly 6 digits, e.g. 101011 ---
+  if (c.length() == 6) {
+    bool allDigits = true;
+    for (int i = 0; i < 6; i++) if (!isDigit(c.charAt(i))) { allDigits = false; break; }
+    if (allDigits) {
+      if (mode != 1) return;
+      driveActuator(c.charAt(0), FL);
+      driveActuator(c.charAt(1), FR);
+      driveActuator(c.charAt(2), RL);
+      driveActuator(c.charAt(3), RR);
+      if (c.charAt(4) == '1') triggerChoreography(c.charAt(5));
+      return;
+    }
+  }
+
+  // --- GESTURE format: words ---
+  if (mode != 0) return;
+  if (c == "STEER_LEFT")   { servoLeft.write(LEFT_POS);  servoRight.write(LEFT_POS);  return; }
+  if (c == "STEER_RIGHT")  { servoLeft.write(RIGHT_POS); servoRight.write(RIGHT_POS); return; }
+  if (c == "STEER_CENTER") { servoLeft.write(CENTER);    servoRight.write(CENTER);    return; }
+  command = c;              // UP / DOWN / LEFT / RIGHT / STOP
+  cmdTime = millis();
+}
+
+void loop() {
+  // ---- USB serial (gesture + music) ----
+  if (Serial.available() > 0) {
+    processCommand(Serial.readStringUntil('\n'));
+  }
+
+  // ---- Bluetooth (app) ----
+  while (Serial1.available() > 0) {
+    char ch = Serial1.read();
+    if (ch == '\n' || ch == '\r') {
+      if (bluetoothCommand.length() > 0) { processCommand(bluetoothCommand); bluetoothCommand = ""; }
+    } else {
+      bluetoothCommand += ch;
+      lastBtChar = millis();
+    }
+  }
+  if (bluetoothCommand.length() > 0 && millis() - lastBtChar > BT_DELAY) {
+    processCommand(bluetoothCommand); bluetoothCommand = "";
+  }
+
+  // ---- Gesture-mode actuator latch ----
+  if (mode == 0) {
+    if (millis() - cmdTime < TIMEOUT) {
+      if      (command == "UP")    { extendA(FL); extendA(FR); extendA(RL); extendA(RR); }
+      else if (command == "DOWN")  { retractA(FL); retractA(FR); retractA(RL); retractA(RR); }
+      else if (command == "LEFT")  { extendA(FL); extendA(RL); retractA(FR); retractA(RR); }
+      else if (command == "RIGHT") { retractA(FL); retractA(RL); extendA(FR); extendA(RR); }
+      else stopAll();
+    } else stopAll();
+  }
+}
